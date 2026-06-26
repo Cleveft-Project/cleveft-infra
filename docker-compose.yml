@@ -1,15 +1,13 @@
-
-
 services:
   postgres:
     image: pgvector/pgvector:pg16
     container_name: cleveft-postgres
     environment:
       POSTGRES_DB: cleveft
-      POSTGRES_USER: cleveft_user
-      POSTGRES_PASSWORD: cleveft_pass
+      POSTGRES_USER: ${DB_USER:cleveft_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:cleveft_pass}
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
