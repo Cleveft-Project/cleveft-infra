@@ -31,20 +31,21 @@ CREATE TABLE transcription.lectures (
 );
 
 CREATE TABLE transcription.chunks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    lecture_id UUID REFERENCES transcription.lectures(id) ON DELETE CASCADE,
-    chunk_text TEXT NOT NULL,
-    chunk_index INTEGER NOT NULL,
-    embedding vector(1536),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      lecture_id UUID REFERENCES transcription.lectures(id) ON DELETE CASCADE,
+      chunk_text TEXT NOT NULL,
+      chunk_index INTEGER NOT NULL,
+    -- Configured to 768 to natively map to Gemini Google GenAI embedding dimensions
+      embedding vector(768),
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- QUERY SCHEMA TABLES
 CREATE TABLE query.conversations (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL,
-    lecture_id UUID NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+     user_id UUID NOT NULL,
+     lecture_id UUID NOT NULL,
+     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 CREATE TABLE query.messages (
@@ -56,15 +57,29 @@ CREATE TABLE query.messages (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Core vector target table mapped explicitly to the query-service JPA entities
+CREATE TABLE query.document_chunks (
+   id UUID PRIMARY KEY,
+   document_id UUID NOT NULL,
+   content TEXT NOT NULL,
+   metadata JSONB,
+   embedding VECTOR(768) NOT NULL,
+   created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- HNSW index optimized specifically for fast Cosine Distance retrieval lookups at scale
+CREATE INDEX IF NOT EXISTS doc_chunks_vector_idx
+    ON query.document_chunks USING hnsw (embedding vector_cosine_ops);
+
 -- EXAM PREP SCHEMA TABLES
 CREATE TABLE exam_prep.summaries (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    lecture_id UUID NOT NULL,
-    user_id UUID NOT NULL,
-    summary_text TEXT,
-    exam_questions JSONB,
-    key_concepts JSONB,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+     lecture_id UUID NOT NULL,
+     user_id UUID NOT NULL,
+     summary_text TEXT,
+     exam_questions JSONB,
+     key_concepts JSONB,
+     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 CREATE TABLE exam_prep.quiz_attempts (
@@ -78,10 +93,10 @@ CREATE TABLE exam_prep.quiz_attempts (
 );
 
 CREATE TABLE exam_prep.topic_analytics (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL,
-    lecture_id UUID NOT NULL,
-    topic_tag VARCHAR(255),
-    query_count INTEGER DEFAULT 1,
-    last_queried TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+   user_id UUID NOT NULL,
+   lecture_id UUID NOT NULL,
+   topic_tag VARCHAR(255),
+   query_count INTEGER DEFAULT 1,
+   last_queried TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
