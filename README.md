@@ -8,6 +8,8 @@ Cleveft platform.
 | File                 | Purpose                                                            |
 | -------------------- | ------------------------------------------------------------------ |
 | `init.sql`           | **Canonical** database schema. Single source of truth for all services. |
+| `migrations/`        | Numbered schema changes, applied in order to an existing database. |
+| `migrate.sh`         | The runner. Executed by the `migrator` service, not by hand.       |
 | `docker-compose.yml` | PostgreSQL + pgvector, plus an optional profile for every service.  |
 | `.env.example`       | Template for local secrets. Copy to `.env`.                        |
 
@@ -46,16 +48,45 @@ directly.
 
 ## Changing the schema
 
-`init.sql` runs **only when the postgres volume is first created**. Editing it
-does nothing to an existing database. To apply changes locally:
+`init.sql` runs **only when the postgres volume is first created**, and this
+volume is external and long-lived — so editing that file alone does nothing to
+a database that already exists.
 
-```bash
-docker compose down -v        # destroys the volume and all local data
-docker compose up -d
+Schema changes therefore go in `migrations/` as a new numbered file:
+
+```
+migrations/
+  001_align_to_canonical_schema.sql
+  002_add_subscription_plan.sql
+  003_topic_analytics_per_lecture.sql
+  004_course_wide_quizzes.sql
+  005_lecture_source.sql
 ```
 
+The `migrator` service applies them in filename order on the next
+`docker compose up`, before any service that reads the tables is allowed to
+start, so the schema can never be older than the code reading it. Applied
+filenames are recorded in `public.schema_migrations`.
+
+Also update `init.sql`, which remains the readable description of the current
+model and is what a brand-new volume is built from.
+
+Two rules for a migration file:
+
+- **No `BEGIN`/`COMMIT`.** Each file already runs inside one transaction via
+  `--single-transaction`; a stray `COMMIT` closes the runner's transaction early
+  and leaves everything after it unprotected. Files 001–004 predate this rule
+  and still carry theirs.
+- **Make it idempotent.** The ledger prevents re-runs, but idempotence is what
+  makes a partially-migrated database recoverable.
+
+> **Do not run `docker compose down -v`.** The postgres volume holds every
+> lecture, transcript and quiz on this machine, and `-v` destroys it. No schema
+> change requires it — that advice belongs to the era before this migration
+> runner existed.
+
 Every service runs with `ddl-auto=none`, so Hibernate will never silently
-create or alter a table behind your back. If an entity and this file disagree,
+create or alter a table behind your back. If an entity and the schema disagree,
 the service fails loudly at first query — that is intentional.
 
 ## Secrets
