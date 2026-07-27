@@ -1,16 +1,233 @@
+# ============================================================================
+#  Cleveft local infrastructure
+#
+#  Default (data plane only — what you want while developing services in an IDE):
+#      docker compose up -d
+#
+#  Full stack (every microservice containerised):
+#      docker compose --profile services up -d --build
+#
+#  Schema changes
+#  --------------
+#  Add a numbered file to ./migrations. The `migrator` service applies it on the
+#  next `up`, before any service that reads the table is allowed to start, so
+#  the schema can never be older than the code.
+#
+#  Also update init.sql, which stays the readable description of the current
+#  model and is what a brand-new volume is built from.
+#
+#  Do NOT run `docker compose down -v`. The postgres volume is external and
+#  holds every lecture, transcript and quiz on this machine; there is no
+#  migration that requires destroying it, and this file used to advise exactly
+#  that back when init.sql was the only way to change the schema.
+# ============================================================================
+
+x-service-env: &service-env
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_NAME: ${DB_NAME:-cleveft}
+  DB_USERNAME: ${DB_USERNAME:-cleveft_user}
+  DB_PASSWORD: ${DB_PASSWORD:-cleveft_pass}
+  JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-value-at-least-32-bytes}
+  GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+
+  # --------------------------------------------------------------------------
+  #  Model allocation
+  # --------------------------------------------------------------------------
+  #  Every Gemini model has its own free-tier quota pool, so which call uses
+  #  which model decides what fails first. These are deliberately spread rather
+  #  than defaulted, because the default put four different jobs on one model
+  #  and exhausting it took the whole app down at once.
+  #
+  #    flash-lite : speech-to-text, quiz generation
+  #    flash      : note structuring, chat answers
+  #    embedding  : its own model, its own pool, unaffected by either
+  #
+  #  Speech-to-text is the heaviest single call and keeps flash-lite largely to
+  #  itself. Note structuring moved off it so that importing a PDF — which
+  #  never touches speech-to-text — cannot be refused because a lecture was
+  #  transcribed an hour earlier.
+  #
+  #  gemini-3.5-flash's free tier has been failing under load since mid-June
+  #  2026 (a documented Google-side issue, not ours), which is why the audio
+  #  path sits on flash-lite.
+  # --------------------------------------------------------------------------
+  GEMINI_STT_MODEL: ${GEMINI_STT_MODEL:-gemini-3.5-flash-lite}
+  GEMINI_NOTES_MODEL: ${GEMINI_NOTES_MODEL:-gemini-3.5-flash}
+  GEMINI_CHAT_MODEL: ${GEMINI_CHAT_MODEL:-gemini-3.5-flash}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
     container_name: cleveft-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: cleveft
-      POSTGRES_USER: ${DB_USER:cleveft_user}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:cleveft_pass}
+      POSTGRES_DB: ${DB_NAME:-cleveft}
+      POSTGRES_USER: ${DB_USERNAME:-cleveft_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-cleveft_pass}
     ports:
-      - "5433:5432"
+      - "${DB_EXPOSED_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-cleveft_user} -d ${DB_NAME:-cleveft}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [cleveft]
+
+  # Applies migrations/*.sql, then exits. Every application service waits for
+  # this to complete successfully, so the schema can never be older than the
+  # code reading it — which is what a hand-applied migration cannot guarantee.
+  #
+  # Reuses the Postgres image purely because it already contains psql; nothing
+  # here needs a server.
+  migrator:
+    image: pgvector/pgvector:pg16
+    container_name: cleveft-migrator
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGPASSWORD: ${DB_PASSWORD:-cleveft_pass}
+      POSTGRES_USER: ${DB_USERNAME:-cleveft_user}
+      POSTGRES_DB: ${DB_NAME:-cleveft}
+      # This database predates the migration runner and had 001-004 applied by
+      # hand. See the baselining note in migrate.sh. A fresh database ignores
+      # this and runs everything.
+      MIGRATIONS_BASELINE: ${MIGRATIONS_BASELINE:-004_course_wide_quizzes.sql}
+    volumes:
+      - ./migrations:/migrations:ro
+      - ./migrate.sh:/migrate.sh:ro
+    entrypoint: ["/bin/sh", "/migrate.sh"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [cleveft]
+
+  auth-service:
+    profiles: [services]
+    build:
+      context: ../Cleveft-auth-service
+    container_name: cleveft-auth-service
+    restart: unless-stopped
+    environment:
+      <<: *service-env
+      SERVER_PORT: "8084"
+    ports: ["8084:8084"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+    networks: [cleveft]
+
+  transcription-service:
+    profiles: [services]
+    build:
+      context: ../cleveft-transcription-service
+    container_name: cleveft-transcription-service
+    restart: unless-stopped
+    environment:
+      <<: *service-env
+      SERVER_PORT: "8082"
+      # Read before every upload to get the student's plan and its monthly
+      # recording cap. Without this it defaults to localhost:8084 — nothing —
+      # so the plan lookup fails, and the quota check fails open: every
+      # account behaves as unlimited and the free tier stops meaning anything.
+      AUTH_SERVICE_URL: http://auth-service:8084
+    ports: ["8082:8082"]
+    volumes:
+      - lecture_audio:/var/cleveft/audio
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+    networks: [cleveft]
+
+  query-service:
+    profiles: [services]
+    build:
+      context: ../cleveft-query-service
+    container_name: cleveft-query-service
+    restart: unless-stopped
+    environment:
+      <<: *service-env
+      SERVER_PORT: "8081"
+      TRANSCRIPTION_SERVICE_URL: http://transcription-service:8082
+    ports: ["8081:8081"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+    networks: [cleveft]
+
+  examprep-service:
+    profiles: [services]
+    build:
+      context: ../cleveft-examprep-service
+    container_name: cleveft-examprep-service
+    restart: unless-stopped
+    environment:
+      <<: *service-env
+      SERVER_PORT: "8085"
+      TRANSCRIPTION_SERVICE_URL: http://transcription-service:8082
+      # Without this the readiness page silently loses the "topics you keep
+      # asking about" half of its weak-area signal: the default is localhost,
+      # which inside this container is the exam-prep service itself.
+      QUERY_SERVICE_URL: http://query-service:8081
+    ports: ["8085:8085"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+    networks: [cleveft]
+
+  collab-service:
+    profiles: [services]
+    build:
+      context: ../cleveft-collab-service
+    container_name: cleveft-collab-service
+    restart: unless-stopped
+    environment:
+      <<: *service-env
+      SERVER_PORT: "8086"
+      # Collab resolves peer names and verifies addressees via the auth
+      # service. Without this it defaults to localhost:8086 — itself — so peer
+      # requests 404 ("student not found") and names never resolve.
+      AUTH_SERVICE_URL: http://auth-service:8084
+    ports: ["8086:8086"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+    networks: [cleveft]
+
+  gateway:
+    profiles: [services]
+    build:
+      context: ../Cleveft-gateway
+    container_name: cleveft-gateway
+    restart: unless-stopped
+    environment:
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-value-at-least-32-bytes}
+      SERVER_PORT: "8080"
+      AUTH_SERVICE_URL: http://auth-service:8084
+      QUERY_SERVICE_URL: http://query-service:8081
+      TRANSCRIPTION_SERVICE_URL: http://transcription-service:8082
+      EXAMPREP_SERVICE_URL: http://examprep-service:8085
+      COLLAB_SERVICE_URL: http://collab-service:8086
+      CORS_ALLOWED_ORIGIN_PATTERNS: ${CORS_ALLOWED_ORIGIN_PATTERNS:-*}
+    ports: ["8080:8080"]
+    depends_on:
+      - auth-service
+      - query-service
+      - transcription-service
+      - examprep-service
+      - collab-service
+    networks: [cleveft]
 
 volumes:
   postgres_data:
+    external: true
+    name: cleveft_infra_pgdata
+  lecture_audio:
+
+networks:
+  cleveft:
+    driver: bridge
