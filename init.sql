@@ -81,6 +81,11 @@ CREATE TABLE IF NOT EXISTS transcription.lectures (
     -- Where the words came from. Only affects how the transcript was obtained;
     -- everything downstream treats all three identically.
     source           VARCHAR(20) NOT NULL DEFAULT 'RECORDING',
+    -- Supporting material points at the lecture it explains. Null means the item
+    -- stands on its own. Only rows with a NULL here count towards exam
+    -- readiness: a video explains what you were taught, it does not decide what
+    -- you will be examined on.
+    related_lecture_id UUID REFERENCES transcription.lectures (id) ON DELETE SET NULL,
     full_transcript  TEXT,
     structured_notes JSONB,
     key_concepts     JSONB,
@@ -94,6 +99,8 @@ CREATE TABLE IF NOT EXISTS transcription.lectures (
 
 CREATE INDEX IF NOT EXISTS idx_lectures_user    ON transcription.lectures (user_id);
 CREATE INDEX IF NOT EXISTS idx_lectures_created ON transcription.lectures (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_lectures_related ON transcription.lectures (related_lecture_id)
+    WHERE related_lecture_id IS NOT NULL;
 
 -- The one and only vector table in the system. The query, exam-prep and collab
 -- services reach these rows through the transcription service's HTTP API.
