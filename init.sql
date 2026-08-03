@@ -135,11 +135,17 @@ CREATE TABLE IF NOT EXISTS query.conversations (
     user_id    UUID NOT NULL,
     lecture_id UUID,                       -- NULL = course-wide conversation
     title      VARCHAR(500),
+    -- Held above the date groups in history, for the few threads a student
+    -- returns to all semester rather than works through once.
+    pinned     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON query.conversations (user_id, updated_at DESC);
+-- Matches the order history is always read in, so the drawer is an index scan.
+CREATE INDEX IF NOT EXISTS idx_conversations_user_pinned
+    ON query.conversations (user_id, pinned DESC, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS query.messages (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
