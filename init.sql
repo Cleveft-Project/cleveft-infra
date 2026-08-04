@@ -44,12 +44,44 @@ CREATE TABLE IF NOT EXISTS auth.users (
     plan_renews_at TIMESTAMP WITH TIME ZONE,
     university     VARCHAR(255),
     programme      VARCHAR(255),
+    -- Normalised course codes, so Cleveft can answer "who else takes CSM 266?"
+    -- Read only by containment, which is why it is an array and not a table.
+    courses        JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    -- Whether the address has been proved to belong to whoever signed up.
+    -- Defaults TRUE so nobody who registered before verification existed is
+    -- locked out retroactively.
+    email_verified BOOLEAN      NOT NULL DEFAULT TRUE,
     created_at     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     CONSTRAINT chk_users_plan CHECK (plan IN ('FREE', 'PRO'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON auth.users (email);
+CREATE INDEX IF NOT EXISTS idx_users_courses ON auth.users USING GIN (courses jsonb_path_ops);
+
+-- One-time codes for password reset and email verification. Both features are
+-- the same machinery, so they share one table; only what happens on a
+-- successful check differs. Codes are hashed for the same reason passwords are.
+CREATE TABLE IF NOT EXISTS auth.verification_codes (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- By email, not user_id: a sign-up code exists before any user row does.
+    email        VARCHAR(255) NOT NULL,
+    purpose      VARCHAR(32)  NOT NULL,
+    code_hash    VARCHAR(255) NOT NULL,
+    expires_at   TIMESTAMP WITH TIME ZONE NOT NULL,
+    -- Kept rather than deleted once used, so a replay is distinguishable from a
+    -- code that never existed.
+    consumed_at  TIMESTAMP WITH TIME ZONE,
+    attempts     SMALLINT     NOT NULL DEFAULT 0,
+    created_at   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_verification_purpose
+        CHECK (purpose IN ('PASSWORD_RESET', 'EMAIL_VERIFICATION'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_verification_lookup
+    ON auth.verification_codes (email, purpose, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_verification_expiry
+    ON auth.verification_codes (expires_at);
 
 -- Refresh tokens are persisted so that logout / rotation can revoke them.
 CREATE TABLE IF NOT EXISTS auth.refresh_tokens (
