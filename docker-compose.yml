@@ -115,6 +115,34 @@ services:
     environment:
       <<: *service-env
       SERVER_PORT: "8084"
+      # Password reset and verification codes. Only auth-service sends mail, so
+      # the credential stays out of the shared service-env anchor.
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-Cleveft <cleveft101@gmail.com>}
+      # 587 + STARTTLS by default; 465 + SSL where a network blocks 587.
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_SSL: ${MAIL_SSL:-false}
+      MAIL_STARTTLS: ${MAIL_STARTTLS:-true}
+      # smtps for 465, smtp for 587.
+      MAIL_PROTOCOL: ${MAIL_PROTOCOL:-smtp}
+      # Jakarta Mail's protocol trace. Passed as a plain variable and read by
+      # application.yml — setting spring.mail.properties.* directly from the
+      # environment replaces that whole Map and drops the TLS settings with it.
+      MAIL_DEBUG: ${MAIL_DEBUG:-false}
+      # Codes are logged instead of sent until a username is configured, so the
+      # flow works locally without credentials.
+      MAIL_ENABLED: ${MAIL_ENABLED:-false}
+      # Push. Off by default for the same reason mail is: every rule still runs
+      # and the decision is logged, without a phone buzzing during a test. Set
+      # PUSH_ENABLED=true once there is a real device registered.
+      PUSH_ENABLED: ${PUSH_ENABLED:-false}
+      # Account deletion clears every service that holds the student's data,
+      # over /internal routes the gateway does not expose.
+      TRANSCRIPTION_SERVICE_URL: http://transcription-service:8082
+      QUERY_SERVICE_URL: http://query-service:8081
+      EXAMPREP_SERVICE_URL: http://examprep-service:8085
+      COLLAB_SERVICE_URL: http://collab-service:8086
     ports: ["8084:8084"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -173,6 +201,9 @@ services:
       # asking about" half of its weak-area signal: the default is localhost,
       # which inside this container is the exam-prep service itself.
       QUERY_SERVICE_URL: http://query-service:8081
+      # Auth owns notification preferences and sending, so the weekly readiness
+      # summary is requested from there rather than pushed directly.
+      AUTH_SERVICE_URL: http://auth-service:8084
     ports: ["8085:8085"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -192,6 +223,11 @@ services:
       # service. Without this it defaults to localhost:8086 — itself — so peer
       # requests 404 ("student not found") and names never resolve.
       AUTH_SERVICE_URL: http://auth-service:8084
+      # The course leaderboard aggregates weekly effort from all three, over
+      # /internal routes the gateway does not expose.
+      TRANSCRIPTION_SERVICE_URL: http://transcription-service:8082
+      EXAMPREP_SERVICE_URL: http://examprep-service:8085
+      QUERY_SERVICE_URL: http://query-service:8081
     ports: ["8086:8086"]
     depends_on:
       postgres: { condition: service_healthy }
