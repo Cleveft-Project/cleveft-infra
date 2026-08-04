@@ -1,0 +1,220 @@
+# ============================================================================
+#  Cleveft — single-server deployment
+#
+#      docker compose -f docker-compose.prod.yml up -d --build
+#
+#  Standalone rather than an override on docker-compose.yml, deliberately. An
+#  override cannot *remove* a published port — Compose appends port lists rather
+#  than replacing them — so layering would leave every service still bound to a
+#  public interface. This file is the whole picture, which is also what you want
+#  when you are reading it at two in the morning.
+#
+#  Differences from the development file:
+#
+#    * Only the gateway publishes a port. Everything else talks over the private
+#      compose network, which is what the gateway exists to be the front of.
+#    * Every JVM is capped. Six unconstrained Spring Boot services will each take
+#      a quarter of the host's RAM for heap they never use, and seven containers
+#      doing that does not fit on a small VM.
+#    * Secrets come from .env.prod rather than defaults. There are no fallback
+#      values here on purpose: a missing key should stop the stack, not start it
+#      in a state that half works.
+# ============================================================================
+
+x-jvm: &jvm
+  # MaxRAMPercentage is read against the container limit, so this and mem_limit
+  # move together. SerialGC because these are small heaps on shared vCPUs, where
+  # the parallel collectors' threads cost more than they save.
+  JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=60 -XX:+UseSerialGC -Xss512k"
+
+x-service-env: &service-env
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_NAME: ${DB_NAME}
+  DB_USERNAME: ${DB_USERNAME}
+  DB_PASSWORD: ${DB_PASSWORD}
+  JWT_SECRET: ${JWT_SECRET}
+  GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+  GEMINI_STT_MODEL: ${GEMINI_STT_MODEL:-gemini-3.5-flash-lite}
+  GEMINI_NOTES_MODEL: ${GEMINI_NOTES_MODEL:-gemini-3.5-flash}
+  GEMINI_CHAT_MODEL: ${GEMINI_CHAT_MODEL:-gemini-3.5-flash}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: cleveft-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    # No published port. The database is reachable from the other containers and
+    # from nowhere else — a Postgres on a public IP with a password anyone on the
+    # team knows is found by scanners within hours.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    mem_limit: 512m
+    networks: [cleveft]
+
+  migrator:
+    image: pgvector/pgvector:pg16
+    container_name: cleveft-migrator
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGPASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_DB: ${DB_NAME}
+      # Empty, unlike development. This database is created from init.sql on a
+      # fresh volume, so every migration should run. The development value
+      # baselines past 004 because that machine had them applied by hand.
+      MIGRATIONS_BASELINE: ${MIGRATIONS_BASELINE:-}
+    volumes:
+      - ./migrations:/migrations:ro
+      - ./migrate.sh:/migrate.sh:ro
+    entrypoint: ["/bin/sh", "/migrate.sh"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [cleveft]
+
+  auth-service:
+    build:
+      context: ../Cleveft-auth-service
+    container_name: cleveft-auth-service
+    restart: unless-stopped
+    environment:
+      <<: [*service-env, *jvm]
+      SERVER_PORT: "8084"
+      MAIL_USERNAME: ${MAIL_USERNAME}
+      MAIL_PASSWORD: ${MAIL_PASSWORD}
+      MAIL_FROM: ${MAIL_FROM:-Cleveft <cleveft101@gmail.com>}
+      MAIL_PORT: ${MAIL_PORT:-465}
+      MAIL_SSL: ${MAIL_SSL:-true}
+      MAIL_STARTTLS: ${MAIL_STARTTLS:-false}
+      MAIL_PROTOCOL: ${MAIL_PROTOCOL:-smtps}
+      MAIL_ENABLED: ${MAIL_ENABLED:-true}
+      PUSH_ENABLED: ${PUSH_ENABLED:-true}
+      TRANSCRIPTION_SERVICE_URL: http://transcription-service:8082
+      QUERY_SERVICE_URL: http://query-service:8081
+      EXAMPREP_SERVICE_URL: http://examprep-service:8085
+      COLLAB_SERVICE_URL: http://collab-service:8086
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+    mem_limit: 384m
+    networks: [cleveft]
+
+  transcription-service:
+    build:
+      context: ../cleveft-transcription-service
+    container_name: cleveft-transcription-service
+    restart: unless-stopped
+    environment:
+      <<: [*service-env, *jvm]
+      SERVER_PORT: "8082"
+      AUTH_SERVICE_URL: http://auth-service:8084
+    volumes:
+      - lecture_audio:/var/cleveft/audio
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+    # Roomier than the others: this one holds a whole audio file in memory while
+    # it uploads to Gemini, and an hour-long lecture is not small.
+    mem_limit: 640m
+    networks: [cleveft]
+
+  query-service:
+    build:
+      context: ../cleveft-query-service
+    container_name: cleveft-query-service
+    restart: unless-stopped
+    environment:
+      <<: [*service-env, *jvm]
+      SERVER_PORT: "8081"
+      TRANSCRIPTION_SERVICE_URL: http://transcription-service:8082
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+    mem_limit: 384m
+    networks: [cleveft]
+
+  examprep-service:
+    build:
+      context: ../cleveft-examprep-service
+    container_name: cleveft-examprep-service
+    restart: unless-stopped
+    environment:
+      <<: [*service-env, *jvm]
+      SERVER_PORT: "8085"
+      TRANSCRIPTION_SERVICE_URL: http://transcription-service:8082
+      QUERY_SERVICE_URL: http://query-service:8081
+      AUTH_SERVICE_URL: http://auth-service:8084
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+    mem_limit: 384m
+    networks: [cleveft]
+
+  collab-service:
+    build:
+      context: ../cleveft-collab-service
+    container_name: cleveft-collab-service
+    restart: unless-stopped
+    environment:
+      <<: [*service-env, *jvm]
+      SERVER_PORT: "8086"
+      AUTH_SERVICE_URL: http://auth-service:8084
+      TRANSCRIPTION_SERVICE_URL: http://transcription-service:8082
+      EXAMPREP_SERVICE_URL: http://examprep-service:8085
+      QUERY_SERVICE_URL: http://query-service:8081
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
+    mem_limit: 384m
+    networks: [cleveft]
+
+  # The only thing the outside world can reach.
+  gateway:
+    build:
+      context: ../Cleveft-gateway
+    container_name: cleveft-gateway
+    restart: unless-stopped
+    environment:
+      <<: *jvm
+      JWT_SECRET: ${JWT_SECRET}
+      SERVER_PORT: "8080"
+      AUTH_SERVICE_URL: http://auth-service:8084
+      QUERY_SERVICE_URL: http://query-service:8081
+      TRANSCRIPTION_SERVICE_URL: http://transcription-service:8082
+      EXAMPREP_SERVICE_URL: http://examprep-service:8085
+      COLLAB_SERVICE_URL: http://collab-service:8086
+      CORS_ALLOWED_ORIGIN_PATTERNS: ${CORS_ALLOWED_ORIGIN_PATTERNS:-*}
+    ports:
+      - "8080:8080"
+    depends_on:
+      - auth-service
+      - query-service
+      - transcription-service
+      - examprep-service
+      - collab-service
+    mem_limit: 384m
+    networks: [cleveft]
+
+volumes:
+  # Not external here. The development file points at a volume that already
+  # holds this laptop's lectures; a fresh server creates its own and starts
+  # empty, which is what you want.
+  postgres_data:
+  lecture_audio:
+
+networks:
+  cleveft:
+    driver: bridge
