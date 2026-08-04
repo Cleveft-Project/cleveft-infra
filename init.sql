@@ -51,6 +51,22 @@ CREATE TABLE IF NOT EXISTS auth.users (
     -- Defaults TRUE so nobody who registered before verification existed is
     -- locked out retroactively.
     email_verified BOOLEAN      NOT NULL DEFAULT TRUE,
+    -- Which pushes this student wants. Always read and written whole and only
+    -- by its owner, which is why it is a column rather than five joins.
+    -- Defaults and their reasoning are documented in migration 010.
+    notification_prefs JSONB    NOT NULL DEFAULT '{
+        "lectureReady": true,
+        "pathAdopted": true,
+        "peerRequest": true,
+        "dailyReminder": true,
+        "dailyReminderAt": "19:00",
+        "circleActivity": false,
+        "weeklySummary": true,
+        "quietHoursFrom": "22:00",
+        "quietHoursTo": "07:00"
+    }'::jsonb,
+    -- IANA name from the device. "19:00" is not a time without it.
+    timezone       VARCHAR(64)  NOT NULL DEFAULT 'Africa/Accra',
     created_at     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     CONSTRAINT chk_users_plan CHECK (plan IN ('FREE', 'PRO'))
@@ -94,6 +110,21 @@ CREATE TABLE IF NOT EXISTS auth.refresh_tokens (
 );
 
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON auth.refresh_tokens (user_id);
+
+-- Where a push goes. The token identifies a phone rather than an account, so it
+-- is unique across the table and not per user: signing in on a borrowed handset
+-- moves the token instead of leaving the previous student subscribed to it.
+CREATE TABLE IF NOT EXISTS auth.device_tokens (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      UUID NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
+    token        VARCHAR(255) UNIQUE NOT NULL,
+    platform     VARCHAR(16)  NOT NULL,
+    last_seen_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    created_at   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_device_platform CHECK (platform IN ('ios', 'android', 'web'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON auth.device_tokens (user_id);
 
 -- ============================================================================
 --  TRANSCRIPTION  (owns lecture audio, transcripts and the vector index)
