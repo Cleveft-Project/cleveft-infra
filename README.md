@@ -46,7 +46,9 @@ flowchart TD
 | `migrations/` | Numbered schema changes, applied in order to an existing database. |
 | `migrate.sh` | The runner. Executed by the `migrator` service, not by hand. |
 | `docker-compose.yml` | PostgreSQL + pgvector, plus an optional profile for every service. |
+| `docker-compose.prod.yml` | Single-server deployment. Every service, one published port. |
 | `.env.example` | Template for local secrets. Copy to `.env`. |
+| `.env.prod.example` | Template for server secrets. Copy to `.env.prod`. |
 
 ---
 
@@ -64,6 +66,38 @@ docker compose --profile services up -d --build
 ```
 
 The gateway is then the only port you need: **<http://localhost:8080>**
+
+---
+
+## ☁️ Deploying to one server
+
+`docker-compose.prod.yml` runs the whole backend on a single machine — six
+services and a database on about 4 GB of RAM.
+
+```bash
+cp .env.prod.example .env.prod        # fill in, then keep it off git
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+```
+
+Three things differ from the local file, all of them deliberate:
+
+**Only the gateway publishes a port.** Postgres and the five services are
+reachable from inside the compose network and from nowhere else. A database on a
+public IP with a password the whole team knows is found by scanners within
+hours.
+
+**Every JVM is capped.** `-XX:MaxRAMPercentage=60 -XX:+UseSerialGC` — six Spring
+Boot services will each happily assume the machine is theirs alone, and the
+default collector costs memory this box does not have.
+
+**Migrations gate startup.** The `migrator` service runs first and the others
+wait on `service_completed_successfully`, so no service can come up against a
+schema older than the code inside it.
+
+> [!WARNING]
+> The gateway serves plain HTTP. That is survivable for a demo behind a firewall
+> rule, but Android needs an explicit cleartext exemption to talk to it and iOS
+> refuses outright. Anything longer-lived wants TLS in front.
 
 ---
 
